@@ -100,3 +100,40 @@ def test_old_database_is_migrated_and_backfilled(tmp_path):
     with TestClient(create_app(path, replay=REPLAY)) as c:
         feed = c.get("/api/activities").json()
         assert len(feed) == 1 and feed[0]["sparkline"] and feed[0]["bests"]["1 min"] > 0
+
+
+def test_structured_workout_ride(client):
+    workouts = {w["id"]: w for w in client.get("/api/workouts").json()}
+    assert {"free", "hiit-30-30", "tabata", "pyramid"} <= set(workouts)
+    client.post("/api/workout/start", json={"workout_id": "hiit-30-30"})
+    assert wait_for(lambda: live(client)["revs"] >= 3, timeout=12)
+    snap = live(client)
+    assert snap["workout"]["id"] == "hiit-30-30"
+    assert snap["plan"]["index"] == 0 and snap["plan"]["step"]["kind"] == "warmup"
+    assert snap["plan"]["status"] in ("below", "in", "above")
+    sid = client.post("/api/workout/finish", json={"save": True}).json()["session_id"]
+    a = client.get(f"/api/activities/{sid}").json()
+    assert a["title"] == "HIIT 30/30" and a["workout"]["id"] == "hiit-30-30"
+    assert a["step_results"][0]["kind"] == "warmup"
+
+
+def test_free_ride_with_goal(client):
+    client.post("/api/workout/start", json={"workout_id": "free", "goal": {"type": "time", "value": 600}})
+    assert wait_for(lambda: live(client).get("goal") and live(client)["goal"]["done"] > 1)
+    goal = live(client)["goal"]
+    assert goal["type"] == "time" and 0 < goal["progress"] < 0.05
+    assert live(client)["plan"] is None
+    client.post("/api/workout/finish", json={"save": False})
+
+
+def test_custom_interval_workout(client):
+    body = {"name": "Meu HIIT", "rounds": 4, "work_s": 40, "work_lo": 95, "work_hi": 110,
+            "rest_s": 20, "rest_lo": 55, "rest_hi": 70, "warmup_s": 120, "cooldown_s": 0}
+    w = client.post("/api/workouts", json=body).json()
+    assert w["duration_s"] == 120 + 4 * 60 and not w["builtin"]
+    assert any(x["id"] == w["id"] for x in client.get("/api/workouts").json())
+    assert client.post("/api/workouts", json={**body, "work_lo": 120}).status_code == 422
+    assert client.delete("/api/workouts/hiit-30-30").status_code == 400
+    client.delete(f"/api/workouts/{w['id']}")
+    assert all(x["id"] != w["id"] for x in client.get("/api/workouts").json())
+

@@ -6,6 +6,7 @@ import threading
 from datetime import date, datetime, timedelta
 
 from .analysis import BEST_WINDOWS, Ride, default_title
+from .workouts import BUILTIN, Workout
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -30,22 +31,23 @@ CREATE TABLE IF NOT EXISTS revs (
 );
 CREATE INDEX IF NOT EXISTS revs_session ON revs(session_id, t_s);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS workouts (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 """
 
 # columns added after the first version; older databases get them via ALTER TABLE
 MIGRATIONS = {
     "title": "TEXT", "notes": "TEXT", "weight_kg": "REAL", "moving_s": "REAL",
-    "kcal": "REAL", "bests": "TEXT", "sparkline": "TEXT",
+    "kcal": "REAL", "bests": "TEXT", "sparkline": "TEXT", "workout": "TEXT",
 }
 
 DEFAULT_SETTINGS = {
     "name": "", "device": None, "threshold": 0.1, "edge": "close", "pulses_per_rev": 1,
-    "wheel_m": 6.0, "weight_kg": 75.0, "weekly_goal_min": 150,
+    "wheel_m": 6.0, "weight_kg": 75.0, "weekly_goal_min": 150, "sound": True, "voice": True,
 }
 
 SUMMARY_COLUMNS = ("id, started_at, ended_at, title, notes, duration_s, moving_s, revs, avg_rpm,"
                    " max_rpm, distance_km, kcal, bests, sparkline, wheel_m, pulses_per_rev,"
-                   " weight_kg")
+                   " weight_kg, workout")
 
 
 class Database:
@@ -86,14 +88,42 @@ class Database:
         return self.settings()
 
     # ---- recording
-    def start_session(self, device: str, ppr: int, wheel_m: float, weight_kg: float) -> int:
+    # ---- workouts
+    def workouts(self) -> list[Workout]:
+        with self.lock:
+            rows = self.db.execute("SELECT data FROM workouts ORDER BY rowid").fetchall()
+        return [*BUILTIN.values(), *(Workout.from_dict(json.loads(r["data"])) for r in rows)]
+
+    def workout(self, wid: str) -> Workout | None:
+        return next((w for w in self.workouts() if w.id == wid), None)
+
+    def save_workout(self, w: Workout) -> Workout:
+        if w.id in BUILTIN:
+            raise ValueError("id reservado")
+        with self.lock:
+            self.db.execute("INSERT INTO workouts VALUES (?, ?) ON CONFLICT(id) DO UPDATE"
+                            " SET data=excluded.data", (w.id, json.dumps(w.to_dict())))
+            self.db.commit()
+        return w
+
+    def delete_workout(self, wid: str) -> None:
+        with self.lock:
+            self.db.execute("DELETE FROM workouts WHERE id = ?", (wid,))
+            self.db.commit()
+
+    # ---- recording
+    def start_session(self, device: str, ppr: int, wheel_m: float, weight_kg: float,
+                      workout: Workout | None = None) -> int:
         now = datetime.now()
+        title = default_title(now)
+        if workout and workout.structured:
+            title = workout.name
         with self.lock:
             cur = self.db.execute(
-                "INSERT INTO sessions (started_at, device, pulses_per_rev, wheel_m, weight_kg, title)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (now.isoformat(timespec="seconds"), device, ppr, wheel_m, weight_kg,
-                 default_title(now)))
+                "INSERT INTO sessions (started_at, device, pulses_per_rev, wheel_m, weight_kg, title,"
+                " workout) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (now.isoformat(timespec="seconds"), device, ppr, wheel_m, weight_kg, title,
+                 json.dumps(workout.to_dict()) if workout else None))
             self.db.commit()
         return cur.lastrowid
 
@@ -165,6 +195,7 @@ class Database:
         d = dict(row)
         d["bests"] = json.loads(d["bests"]) if d["bests"] else {}
         d["sparkline"] = json.loads(d["sparkline"]) if d["sparkline"] else []
+        d["workout"] = json.loads(d["workout"]) if d.get("workout") else None
         if d["moving_s"] is None:
             d["moving_s"] = d["duration_s"]
         return d
@@ -184,8 +215,25 @@ class Database:
         if row is None:
             return None
         d = self._summary(row)
-        d.update(self._ride(sid).detail())
+        ride = self._ride(sid)
+        d.update(ride.detail())
+        if d["workout"] and d["workout"]["steps"]:
+            d["step_results"] = ride.step_results(d["workout"]["steps"])
         return d
+
+    def new_records(self, sid: int) -> list[dict]:
+        """Best efforts of this ride that beat every earlier ride."""
+        with self.lock:
+            rows = self.db.execute("SELECT id, bests FROM sessions WHERE ended_at IS NOT NULL"
+                                   " AND bests IS NOT NULL").fetchall()
+        mine = next((json.loads(r["bests"]) for r in rows if r["id"] == sid), {})
+        others = [json.loads(r["bests"]) for r in rows if r["id"] != sid]
+        out = []
+        for label, v in mine.items():
+            previous = [o[label] for o in others if label in o]
+            if previous and v > max(previous):
+                out.append({"label": label, "rpm": v, "previous": max(previous)})
+        return out
 
     def update_activity(self, sid: int, title: str | None = None, notes: str | None = None) -> None:
         with self.lock:

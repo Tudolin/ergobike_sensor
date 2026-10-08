@@ -202,6 +202,20 @@ class Ride:
             return []
         return [round(float(c.mean()), 1) for c in np.array_split(rpm, min(points, len(rpm)))]
 
+    def step_results(self, steps: list[dict]) -> list[dict]:
+        """Average cadence and share of time inside the target range, per workout step."""
+        t, rpm = self.grid
+        out = []
+        start = 0.0
+        for s in steps:
+            end = start + s["seconds"]
+            seg = rpm[(t >= start) & (t < end)]
+            if len(seg):
+                out.append({**s, "start_s": start, "avg_rpm": round(float(seg.mean()), 1),
+                            "in_target_pct": round(100 * float(((seg >= s["lo"]) & (seg <= s["hi"])).mean()))})
+            start = end
+        return out
+
     def detail(self) -> dict:
         return {"series": self.series(), "zones": self.zones(), "splits": self.splits()}
 

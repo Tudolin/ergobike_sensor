@@ -96,6 +96,8 @@ const ICON = {
   download: I('<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>'),
   trash: I('<path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/>'),
   trophy: I('<path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0zM17 5h3v2a3 3 0 0 1-3 3M7 5H4v2a3 3 0 0 0 3 3"/>', 'width="12" height="12"'),
+  expand: I('<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'),
+  trophyBig: I('<path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0zM17 5h3v2a3 3 0 0 1-3 3M7 5H4v2a3 3 0 0 0 3 3"/>', 'width="40" height="40"'),
   wave: I('<path d="M2 12h3l2-6 4 12 3-9 2 3h6"/>'),
 };
 
@@ -152,6 +154,9 @@ function connect() {
   const ws = new WebSocket(`ws://${location.host}/ws`);
   ws.onmessage = (e) => {
     S.live = JSON.parse(e.data);
+    if (S.prevState === "idle" && S.live.state !== "idle") resetCues();
+    S.prevState = S.live.state;
+    runCues(S.live);
     updateSideStatus();
     if (S.view === "treino") updateTreino();
     if (S.view === "ajustes") updateMeter();
@@ -221,6 +226,28 @@ const crosshairPlugin = {
   },
 };
 
+// workout steps: translucent band over each step's target range, drawn behind the line
+const bandsPlugin = {
+  id: "bands",
+  beforeDatasetsDraw(chart, _args, opts) {
+    if (!opts || !opts.steps || !opts.steps.length) return;
+    const { ctx, chartArea: a, scales: { x, y } } = chart;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(a.left, a.top, a.right - a.left, a.bottom - a.top); ctx.clip();
+    let t = 0;
+    for (const s of opts.steps) {
+      const x0 = x.getPixelForValue(t), x1 = x.getPixelForValue(t + s.seconds);
+      t += s.seconds;
+      if (x1 < a.left || x0 > a.right) continue;
+      const y0 = y.getPixelForValue(s.hi), y1 = y.getPixelForValue(s.lo);
+      ctx.fillStyle = cssv(`--${zoneOf(s.lo).id.toLowerCase()}`);
+      ctx.globalAlpha = 0.22;
+      ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+    }
+    ctx.restore();
+  },
+};
+
 function cadenceChart(canvas, points, avg, opts = {}) {
   const th = chartTheme();
   const chart = new Chart(canvas, {
@@ -244,6 +271,7 @@ function cadenceChart(canvas, points, avg, opts = {}) {
       plugins: {
         legend: { display: false },
         avgLine: { value: avg, color: th.ink2, bg: th.surface, font: th.font },
+        bands: { steps: opts.steps || [] },
         tooltip: {
           backgroundColor: th.surface, titleColor: th.muted, bodyColor: th.ink, borderColor: th.grid,
           borderWidth: 1, padding: 10, displayColors: false, bodyFont: { weight: "600", size: 14 },
@@ -251,7 +279,7 @@ function cadenceChart(canvas, points, avg, opts = {}) {
         },
       },
     },
-    plugins: [avgLinePlugin, crosshairPlugin],
+    plugins: [bandsPlugin, avgLinePlugin, crosshairPlugin],
   });
   S.charts.push(chart);
   return chart;
@@ -309,6 +337,95 @@ function zonesBar(zones) {
 }
 
 // ---- ride screen
+const KIND_LABEL = { warmup: "Aquecimento", work: "Esforço", rest: "Recuperação", steady: "Ritmo", cooldown: "Desaquecimento" };
+const STATUS = {
+  below: { label: "Acelere", icon: "↑", cls: "below" },
+  in: { label: "No alvo", icon: "✓", cls: "in" },
+  above: { label: "Alivie", icon: "↓", cls: "above" },
+};
+const GOALS = {
+  time: [[1200, "20 min"], [1800, "30 min"], [2700, "45 min"], [3600, "60 min"]],
+  distance: [[5, "5 km"], [10, "10 km"], [15, "15 km"], [20, "20 km"]],
+};
+
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (_) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) { /* private mode */ } },
+};
+
+// beeps and spoken cues; the AudioContext has to be created from a click
+const Cues = {
+  ctx: null,
+  unlock() {
+    if (!this.ctx) { try { this.ctx = new AudioContext(); } catch (_) { /* no audio */ } }
+    if (this.ctx && this.ctx.state === "suspended") this.ctx.resume();
+  },
+  beep(freq = 880, ms = 120, when = 0) {
+    if (!S.settings?.sound || !this.ctx) return;
+    const t = this.ctx.currentTime + when;
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.frequency.value = freq; o.type = "sine";
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.35, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + ms / 1000);
+    o.connect(g).connect(this.ctx.destination);
+    o.start(t); o.stop(t + ms / 1000 + 0.02);
+  },
+  say(text) {
+    if (!S.settings?.voice || !("speechSynthesis" in window)) return;
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "pt-BR";
+    const v = speechSynthesis.getVoices().find((x) => x.lang && x.lang.toLowerCase().startsWith("pt"));
+    if (v) u.voice = v;
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+  },
+  stepStart(step) {
+    this.beep(660, 180); this.beep(990, 260, 0.2);
+    const secs = step.seconds >= 120 ? `${Math.round(step.seconds / 60)} minutos` : `${step.seconds} segundos`;
+    this.say(`${step.name}. ${secs}. ${step.lo} a ${step.hi} rpm.`);
+  },
+  done(text) { [0, 0.18, 0.36].forEach((w, i) => this.beep(660 + i * 220, 160, w)); this.say(text); },
+};
+
+// tracks what was already announced so each cue fires once
+const cueState = { step: null, tick: null, planDone: false, goalDone: false };
+function resetCues() { Object.assign(cueState, { step: null, tick: null, planDone: false, goalDone: false }); }
+
+function runCues(l) {
+  if (l.state !== "running") return;
+  const p = l.plan;
+  if (p && !p.finished) {
+    if (cueState.step !== p.index) {
+      if (cueState.step !== null || p.step_elapsed_s < 3) Cues.stepStart(p.step);
+      cueState.step = p.index;
+      cueState.tick = null;
+    }
+    const left = Math.ceil(p.step_remaining_s);
+    if (left <= 3 && left >= 1 && cueState.tick !== left) { cueState.tick = left; Cues.beep(880, 110); }
+  }
+  if (p && p.finished && !cueState.planDone) { cueState.planDone = true; Cues.done("Treino concluído. Bom trabalho!"); }
+  if (l.goal && l.goal.progress >= 1 && !cueState.goalDone) { cueState.goalDone = true; Cues.done("Meta atingida!"); }
+}
+
+function profileSvg(steps, h = 44) {
+  if (!steps || !steps.length) {
+    return `<svg class="profile" viewBox="0 0 100 ${h}" preserveAspectRatio="none" aria-hidden="true">
+      <path d="M0,${h * 0.55} C20,${h * 0.45} 35,${h * 0.62} 50,${h * 0.5} S80,${h * 0.42} 100,${h * 0.52}" class="free"/></svg>`;
+  }
+  const total = steps.reduce((a, s) => a + s.seconds, 0);
+  let x = 0;
+  const rects = steps.map((s) => {
+    const w = (100 * s.seconds) / total, top = h - (Math.min(s.hi, 130) / 130) * h;
+    const r = `<rect x="${x.toFixed(2)}" y="${top.toFixed(1)}" width="${Math.max(w - 0.4, 0.3).toFixed(2)}" height="${(h - top).toFixed(1)}" fill="${zoneVar(zoneOf(s.lo).id)}"/>`;
+    x += w;
+    return r;
+  });
+  return `<svg class="profile" viewBox="0 0 100 ${h}" preserveAspectRatio="none" aria-hidden="true">${rects.join("")}</svg>`;
+}
+
+const durLabel = (w) => (w.duration_s ? fmt.durWords(w.duration_s) : "Livre");
+
 async function viewTreino(el) {
   S.liveMode = null;
   el.innerHTML = "";
@@ -338,15 +455,22 @@ async function renderIdle(el) {
   const hello = h < 12 ? "Bom dia" : h < 18 ? "Boa tarde" : "Boa noite";
   const l = S.live;
   el.innerHTML = `
-    <div class="page-head"><div><h1>${hello}${name}</h1><div class="sub">Pronto para pedalar?</div></div></div>
+    <div class="page-head"><div><h1>${hello}${name}</h1><div class="sub">Escolha um treino e comece a pedalar.</div></div></div>
     ${l && !l.source_ok ? `<div class="banner">Não consegui abrir a entrada de áudio: ${esc(l.source_error || "")}<a href="#/ajustes">Ajustar sensor</a></div>` : ""}
-    <div class="card start-wrap">
+    <div class="card"><div class="card-head"><h2>Modo de treino</h2>
+      <button class="btn ghost" id="new-workout">+ Criar intervalos</button></div>
+      <div class="workouts" id="workouts"><div class="sub" style="color:var(--muted)">Carregando…</div></div>
+      <div id="goal-row"></div>
+    </div>
+    <div class="card start-wrap" style="margin-top:16px">
       <div id="sensor-pill">${sensorPill(l)}</div>
       <button class="start-btn" id="start" ${l && l.source_ok ? "" : "disabled"}>${ICON.play}Iniciar</button>
-      <div class="sub" style="color:var(--muted)">A cadência aparece assim que o ímã passar pelo sensor.</div>
+      <div class="sub" id="start-sub" style="color:var(--muted)"></div>
     </div>
     <div class="grid cols-2" style="margin-top:16px" id="idle-cards"></div>`;
   $("#start").onclick = startWorkout;
+  $("#new-workout").onclick = workoutBuilder;
+  await renderWorkoutPicker();
   const [stats, acts] = await Promise.all([api("/api/stats?weeks=1"), api("/api/activities?limit=1")]);
   if (S.view !== "treino" || S.liveMode !== "idle") return;
   const wk = stats.weeks[0];
@@ -369,10 +493,123 @@ async function renderIdle(el) {
     </div>`;
 }
 
+async function renderWorkoutPicker() {
+  S.workouts = await api("/api/workouts");
+  if (S.view !== "treino" || S.liveMode !== "idle") return;
+  if (!S.workouts.some((w) => w.id === S.selectedWorkout)) S.selectedWorkout = store.get("workout", "free");
+  if (!S.workouts.some((w) => w.id === S.selectedWorkout)) S.selectedWorkout = "free";
+  $("#workouts").innerHTML = S.workouts.map((w) => `
+    <button class="wk ${w.id === S.selectedWorkout ? "on" : ""}" data-id="${esc(w.id)}" aria-pressed="${w.id === S.selectedWorkout}">
+      ${profileSvg(w.steps)}
+      <span class="wk-name">${esc(w.name)}</span>
+      <span class="wk-dur">${durLabel(w)}</span>
+      <span class="wk-desc">${esc(w.description)}</span>
+      ${w.builtin ? "" : `<span class="wk-del" data-del="${esc(w.id)}" title="Apagar">${ICON.trash}</span>`}
+    </button>`).join("");
+  $$("#workouts .wk").forEach((b) => (b.onclick = async (e) => {
+    const del = e.target.closest("[data-del]");
+    if (del) {
+      e.stopPropagation();
+      if (!confirm("Apagar este treino?")) return;
+      await api(`/api/workouts/${encodeURIComponent(del.dataset.del)}`, { method: "DELETE" });
+      return renderWorkoutPicker();
+    }
+    S.selectedWorkout = b.dataset.id;
+    store.set("workout", S.selectedWorkout);
+    $$("#workouts .wk").forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-pressed", x === b); });
+    renderGoalRow();
+  }));
+  renderGoalRow();
+}
+
+function renderGoalRow() {
+  const w = S.workouts.find((x) => x.id === S.selectedWorkout);
+  const row = $("#goal-row");
+  if (!row || !w) return;
+  const sub = $("#start-sub");
+  if (w.steps.length) {
+    row.innerHTML = "";
+    const work = w.steps.filter((s) => s.kind === "work").length;
+    if (sub) sub.textContent = `${w.name} · ${fmt.durWords(w.duration_s)}${work ? ` · ${work} tiros` : ""}. Siga a faixa de rpm de cada etapa.`;
+    return;
+  }
+  const g = store.get("goal", null);
+  const opt = (type, v, label) => `<button data-t="${type}" data-v="${v}" class="${g && g.type === type && g.value === v ? "on" : ""}">${label}</button>`;
+  row.innerHTML = `<div class="goal-row"><span class="label">Meta</span>
+    <div class="segmented" id="goal-seg">
+      <button data-t="" class="${g ? "" : "on"}">Sem meta</button>
+      ${GOALS.time.map(([v, l]) => opt("time", v, l)).join("")}
+      ${S.settings?.wheel_m ? GOALS.distance.map(([v, l]) => opt("distance", v, l)).join("") : ""}
+    </div></div>`;
+  const describe = (goal) => (goal ? `Meta: ${goal.type === "time" ? fmt.durWords(goal.value) : `${goal.value} km`}.` : "Pedal livre, sem roteiro.");
+  if (sub) sub.textContent = describe(g);
+  $$("#goal-seg button").forEach((b) => (b.onclick = () => {
+    const goal = b.dataset.t ? { type: b.dataset.t, value: +b.dataset.v } : null;
+    store.set("goal", goal);
+    $$("#goal-seg button").forEach((x) => x.classList.toggle("on", x === b));
+    if (sub) sub.textContent = describe(goal);
+  }));
+}
+
+function workoutBuilder() {
+  const m = modal(`
+    <h3>Criar treino intervalado</h3>
+    <div class="field"><label for="b-name">Nome</label><input class="input" id="b-name" value="Meus intervalos" maxlength="60"></div>
+    <div class="form-row">
+      <div class="field"><label for="b-rounds">Rodadas</label><input class="input" id="b-rounds" type="number" min="1" max="50" value="8"></div>
+      <div class="field"><label for="b-warm">Aquecimento (min)</label><input class="input" id="b-warm" type="number" min="0" max="60" value="5"></div>
+    </div>
+    <div class="builder-block"><b>Esforço</b>
+      <div class="form-row three">
+        <div class="field"><label for="b-ws">Duração (s)</label><input class="input" id="b-ws" type="number" min="5" max="3600" value="40"></div>
+        <div class="field"><label for="b-wlo">rpm mín</label><input class="input" id="b-wlo" type="number" min="20" max="200" value="95"></div>
+        <div class="field"><label for="b-whi">rpm máx</label><input class="input" id="b-whi" type="number" min="20" max="220" value="115"></div>
+      </div></div>
+    <div class="builder-block"><b>Descanso</b>
+      <div class="form-row three">
+        <div class="field"><label for="b-rs">Duração (s)</label><input class="input" id="b-rs" type="number" min="0" max="3600" value="20"></div>
+        <div class="field"><label for="b-rlo">rpm mín</label><input class="input" id="b-rlo" type="number" min="0" max="200" value="55"></div>
+        <div class="field"><label for="b-rhi">rpm máx</label><input class="input" id="b-rhi" type="number" min="0" max="220" value="70"></div>
+      </div></div>
+    <div class="field"><label for="b-cool">Desaquecimento (min)</label><input class="input" id="b-cool" type="number" min="0" max="60" value="5"></div>
+    <div class="callout" id="b-sum"></div>
+    <div class="actions" style="justify-content:flex-end"><button class="btn" id="b-cancel">Cancelar</button><button class="btn primary" id="b-save">Salvar treino</button></div>`);
+  const v = (id) => +$(`#${id}`, m).value;
+  const summary = () => {
+    const total = v("b-warm") * 60 + v("b-rounds") * (v("b-ws") + v("b-rs")) + v("b-cool") * 60;
+    $("#b-sum", m).textContent = `${v("b-rounds")} x ${v("b-ws")} s a ${v("b-wlo")}–${v("b-whi")} rpm` +
+      (v("b-rs") ? ` com ${v("b-rs")} s leves` : "") + ` · total ${fmt.durWords(total)}`;
+  };
+  $$("input", m).forEach((i) => (i.oninput = summary));
+  summary();
+  $("#b-cancel", m).onclick = () => m.remove();
+  $("#b-save", m).onclick = async () => {
+    try {
+      const w = await api("/api/workouts", { method: "POST", body: JSON.stringify({
+        name: $("#b-name", m).value.trim() || "Intervalos", rounds: v("b-rounds"),
+        work_s: v("b-ws"), work_lo: v("b-wlo"), work_hi: v("b-whi"),
+        rest_s: v("b-rs"), rest_lo: v("b-rlo"), rest_hi: v("b-rhi"),
+        warmup_s: v("b-warm") * 60, cooldown_s: v("b-cool") * 60 }) });
+      m.remove();
+      S.selectedWorkout = w.id;
+      store.set("workout", w.id);
+      toast("Treino criado");
+      renderWorkoutPicker();
+    } catch (e) { toast(e.message === "Unprocessable Content" ? "Confira as faixas de rpm (mín < máx)" : e.message); }
+  };
+}
+
 function renderActive(el) {
+  const l = S.live;
+  const w = l.workout || {};
+  const structured = w.steps && w.steps.length;
   el.innerHTML = `
-    <div class="page-head"><div><h1>Treino</h1></div><div id="rec-pill"></div></div>
-    <div class="card hero">
+    <div class="page-head"><div><h1>${esc(w.name || "Treino")}</h1></div>
+      <div class="actions"><div id="rec-pill"></div>
+        <button class="btn ghost" id="focus" title="Modo foco (F)">${ICON.expand}</button></div></div>
+    ${structured ? `<div class="card step-card" id="step-card"></div>` : ""}
+    <div id="goal-card"></div>
+    <div class="card hero" style="margin-top:16px">
       <div><div class="hero-rpm" id="rpm">0</div>
         <div class="hero-unit">rpm <span class="zone-chip" id="zone"></span></div></div>
       <div class="metrics">
@@ -389,17 +626,62 @@ function renderActive(el) {
       <div class="chart-box"><canvas id="live-chart" aria-label="Cadência ao vivo"></canvas></div></div>
     <div class="card" style="margin-top:16px"><h2>Tempo em cada zona</h2><div id="zones"></div></div>
     <div class="controls" style="margin-top:24px">
-      <button class="btn round" id="pause" title="Pausar"></button>
+      <button class="btn round" id="pause" title="Pausar (espaço)"></button>
       <button class="btn primary" id="finish" style="height:52px;padding:0 28px">${ICON.stop} Finalizar</button>
-    </div>`;
-  S.liveChart = cadenceChart($("#live-chart"), [], 0);
-  $("#pause").onclick = () => api(`/api/workout/${S.live.state === "running" ? "pause" : "resume"}`, { method: "POST" });
+    </div>
+    <div class="kbd-hint">Espaço pausa · F modo foco</div>`;
+  S.liveChart = cadenceChart($("#live-chart"), [], 0, { steps: structured ? w.steps : [] });
+  $("#pause").onclick = togglePause;
   $("#finish").onclick = finishDialog;
+  $("#focus").onclick = toggleFocus;
+}
+
+function togglePause() {
+  if (!S.live || S.live.state === "idle") return;
+  api(`/api/workout/${S.live.state === "running" ? "pause" : "resume"}`, { method: "POST" });
+}
+
+function toggleFocus() {
+  const on = document.body.classList.toggle("focus");
+  try {
+    if (on && document.documentElement.requestFullscreen) document.documentElement.requestFullscreen().catch(() => {});
+    else if (!on && document.fullscreenElement) document.exitFullscreen();
+  } catch (_) { /* not supported by this webview */ }
+}
+
+function stepCardHtml(l) {
+  const p = l.plan, steps = l.workout.steps;
+  const total = steps.reduce((a, s) => a + s.seconds, 0);
+  const segs = steps.map((s, i) => {
+    const fill = p.finished || i < p.index ? 100 : i === p.index ? (100 * p.step_elapsed_s) / s.seconds : 0;
+    return `<span style="flex-grow:${s.seconds}" class="${i === p.index ? "cur" : ""}"><i style="width:${fill}%;background:${zoneVar(zoneOf(s.lo).id)}"></i></span>`;
+  }).join("");
+  const bar = `<div class="plan-bar">${segs}</div>
+    <div class="plan-meta"><span>${fmt.dur(total - p.remaining_s)} de ${fmt.dur(total)}</span><span>faltam ${fmt.dur(p.remaining_s)}</span></div>`;
+  if (p.finished) {
+    return `<div class="step-done"><b>Treino concluído!</b> Continue pedalando livre ou finalize para salvar.</div>${bar}`;
+  }
+  const s = p.step, st = STATUS[p.status] || STATUS.below;
+  const c = p.compliance[p.index];
+  const next = p.next ? `Próximo: <b>${esc(p.next.name)}</b> · ${fmt.dur(p.next.seconds)} · ${p.next.lo}–${p.next.hi} rpm` : "Última etapa";
+  return `
+    <div class="step-main" style="--zone:${zoneVar(zoneOf(s.lo).id)}">
+      <div class="step-info">
+        <div class="step-kind">${KIND_LABEL[s.kind] || ""} · etapa ${p.index + 1} de ${steps.length}</div>
+        <div class="step-name">${esc(s.name)}</div>
+        <div class="step-target">alvo <b>${s.lo}–${s.hi}</b> rpm</div>
+      </div>
+      <div class="step-status ${st.cls}" role="status"><span>${st.icon}</span>${st.label}</div>
+      <div class="step-clock num">${fmt.dur(Math.ceil(p.step_remaining_s))}</div>
+    </div>
+    <div class="step-next"><span>${next}</span>${c != null ? `<span>no alvo nesta etapa: <b>${c}%</b></span>` : ""}</div>
+    ${bar}`;
 }
 
 function patchActive(l) {
   const rpm = l.rpm || 0, z = zoneOf(rpm), wheel = S.settings?.wheel_m || 0;
   $("#rpm").textContent = fmt.rpm(rpm);
+  $("#rpm").className = `hero-rpm${l.plan && !l.plan.finished ? ` st-${l.plan.status}` : ""}`;
   $("#zone").innerHTML = rpm ? `<i style="background:${zoneVar(z.id)}"></i>${z.id} · ${z.name}` : "parado";
   const set = (id, v) => { const e = $(`#${id}`); if (e) e.firstChild.nodeValue = v; };
   set("m-time", fmt.dur(l.elapsed_s));
@@ -415,7 +697,17 @@ function patchActive(l) {
   if (pb.dataset.s !== l.state) {
     pb.dataset.s = l.state;
     pb.innerHTML = rec ? ICON.pause : ICON.play;
-    pb.title = rec ? "Pausar" : "Retomar";
+    pb.title = rec ? "Pausar (espaço)" : "Retomar (espaço)";
+  }
+  const sc = $("#step-card");
+  if (sc && l.plan) sc.innerHTML = stepCardHtml(l);
+  const gc = $("#goal-card");
+  if (gc) {
+    const g = l.goal;
+    gc.innerHTML = g ? `<div class="card goal-card" style="margin-top:16px">
+      <div class="plan-meta"><b>Meta: ${g.type === "time" ? fmt.durWords(g.value) : `${g.value} km`}</b>
+      <span>${g.type === "time" ? `${fmt.dur(g.done)} de ${fmt.dur(g.value)}` : `${fmt.km(g.done)} de ${g.value} km`}${g.progress >= 1 ? " · atingida!" : ""}</span></div>
+      <div class="goal-bar"><i style="width:${(100 * g.progress).toFixed(1)}%"></i></div></div>` : "";
   }
   $("#zones").innerHTML = zonesBar(l.zones);
   const c = S.liveChart;
@@ -429,8 +721,15 @@ function patchActive(l) {
 }
 
 async function startWorkout() {
+  Cues.unlock();
+  const w = (S.workouts || []).find((x) => x.id === S.selectedWorkout);
+  const body = { workout_id: w ? w.id : "free" };
+  if (!w || !w.steps.length) {
+    const g = store.get("goal", null);
+    if (g && (g.type === "time" || S.settings?.wheel_m)) body.goal = g;
+  }
   try {
-    await api("/api/workout/start", { method: "POST" });
+    await api("/api/workout/start", { method: "POST", body: JSON.stringify(body) });
   } catch (e) { toast(e.message); }
 }
 
@@ -439,7 +738,7 @@ function finishDialog() {
   const m = modal(`
     <h3>Finalizar treino</h3>
     <div class="summary">${metric("Tempo", fmt.dur(l.elapsed_s))}${metric("Cadência", fmt.rpm(l.avg_rpm), "rpm")}${metric("Calorias", fmt.int(l.kcal), "kcal")}</div>
-    <div class="field"><label for="f-title">Título</label><input class="input" id="f-title" placeholder="${defaultTitle()}"></div>
+    <div class="field"><label for="f-title">Título</label><input class="input" id="f-title" placeholder="${esc(l.workout?.steps?.length ? l.workout.name : defaultTitle())}"></div>
     <div class="field"><label for="f-notes">Como foi?</label><textarea class="input" id="f-notes" placeholder="Anotações (opcional)"></textarea></div>
     <div class="actions" style="justify-content:space-between">
       <button class="btn ghost danger" id="f-discard">Descartar</button>
@@ -456,10 +755,34 @@ function finishDialog() {
     const r = await api("/api/workout/finish", { method: "POST", body: JSON.stringify({
       save: true, title: $("#f-title", m).value.trim() || null, notes: $("#f-notes", m).value.trim() || null }) });
     m.remove();
-    if (r.session_id) { toast("Atividade salva"); location.hash = `#/atividade/${r.session_id}`; }
-    else toast("Nenhuma pedalada registrada: nada foi salvo");
+    document.body.classList.remove("focus");
+    if (!r.session_id) { toast("Nenhuma pedalada registrada: nada foi salvo"); return; }
+    S.newRecords = r.records || [];
+    toast("Atividade salva");
+    location.hash = `#/atividade/${r.session_id}`;
   };
 }
+
+function showRecords(records) {
+  if (!records || !records.length) return;
+  Cues.done("Novo recorde pessoal!");
+  const m = modal(`
+    <div class="record-head">${ICON.trophyBig}<h3>${records.length > 1 ? "Novos recordes pessoais" : "Novo recorde pessoal"}</h3></div>
+    <div class="rec-list">${records.map((r) => `<div class="rec-row"><span class="t">Melhor ${r.label}</span>
+      <span class="v">${fmt.rpm(r.rpm)} <small>rpm</small></span><span class="d">antes: ${fmt.rpm(r.previous)} rpm</span></div>`).join("")}</div>
+    <div class="actions" style="justify-content:flex-end"><button class="btn primary" id="r-ok">Boa!</button></div>`);
+  $("#r-ok", m).onclick = () => m.remove();
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest("input, textarea, select") || $(".modal-bg")) {
+    if (e.key === "Escape") $$(".modal-bg").forEach((x) => x.remove());
+    return;
+  }
+  if (S.view !== "treino" || !S.live || S.live.state === "idle") return;
+  if (e.code === "Space") { e.preventDefault(); togglePause(); }
+  if (e.key === "f" || e.key === "F") toggleFocus();
+});
 
 // ---- activities
 async function viewFeed(el) {
@@ -487,11 +810,17 @@ async function viewDetail(el, id) {
   const speed = a.moving_s ? (a.distance_km / a.moving_s) * 3600 : 0;
   const maxSplit = Math.max(1, ...a.splits.rows.map((r) => r.avg_rpm));
   const totalZ = a.zones.reduce((s, z) => s + z.seconds, 0) || 1;
+  const steps = a.workout && a.workout.steps.length ? a.workout.steps : [];
+  const results = a.step_results || [];
+  const adherence = results.length
+    ? Math.round(results.reduce((t, r) => t + r.in_target_pct * r.seconds, 0) / results.reduce((t, r) => t + r.seconds, 0))
+    : null;
   el.innerHTML = `
     <a class="back" href="#/atividades">${ICON.back} Atividades</a>
     <div class="page-head" style="margin-bottom:16px"><div style="flex:1;min-width:260px">
       <input class="title-input" id="title" value="${esc(a.title || "Pedal")}" aria-label="Título">
-      <div class="sub">${fmt.dateLong(a.started_at)}</div></div>
+      <div class="sub">${fmt.dateLong(a.started_at)}</div>
+      ${steps.length ? `<div class="wk-chip">${profileSvg(steps, 16)}<span>${esc(a.workout.name)}</span>${adherence != null ? `<b>${adherence}% no alvo</b>` : ""}</div>` : ""}</div>
       <div class="actions">
         <a class="btn" href="/api/activities/${a.id}/export.tcx" title="Para enviar ao Strava, Garmin Connect etc.">${ICON.download} TCX</a>
         <a class="btn" href="/api/activities/${a.id}/export.csv">${ICON.download} CSV</a>
@@ -526,6 +855,14 @@ async function viewDetail(el, id) {
           : `<div class="sub" style="color:var(--muted)">Treinos a partir de 1 min aparecem aqui.</div>`}</div>
     </div>
 
+    ${results.length ? `<div class="card" style="margin-top:16px"><h2>Etapas do treino <span class="hint">tempo dentro da faixa alvo</span></h2>
+      <table class="tbl"><thead><tr><th>#</th><th>Etapa</th><th class="r">Duração</th><th class="r">Alvo</th><th class="r">Média</th><th class="r">No alvo</th><th class="barcell"></th></tr></thead>
+      <tbody>${results.map((r, i) => `<tr class="${r.kind === "work" ? "work-row" : ""}"><td>${i + 1}</td>
+        <td><i class="sw" style="background:${zoneVar(zoneOf(r.lo).id)}"></i>${esc(r.name)}</td>
+        <td class="r">${fmt.dur(r.seconds)}</td><td class="r">${r.lo}–${r.hi}</td><td class="r"><b>${fmt.rpm(r.avg_rpm)}</b></td>
+        <td class="r">${r.in_target_pct}%</td>
+        <td class="barcell"><div class="hbar" style="width:${r.in_target_pct}%"></div></td></tr>`).join("")}</tbody></table></div>` : ""}
+
     <div class="card" style="margin-top:16px"><h2>Parciais <span class="hint">por ${a.splits.unit}</span></h2>
       <table class="tbl"><thead><tr><th>${a.splits.unit === "km" ? "Km" : "Bloco"}</th><th class="r">Tempo</th>
         <th class="r">Voltas</th><th class="r">Cadência</th><th class="barcell"></th></tr></thead>
@@ -534,7 +871,8 @@ async function viewDetail(el, id) {
         <td class="barcell"><div class="hbar" style="width:${(100 * r.avg_rpm) / maxSplit}%"></div></td></tr>`).join("")}</tbody></table></div>`;
 
   const pts = a.series.t.map((x, i) => ({ x, y: a.series.rpm[i] }));
-  cadenceChart($("#c-detail"), pts, a.avg_rpm, { xmin: 0, xmax: a.duration_s });
+  cadenceChart($("#c-detail"), pts, a.avg_rpm, { xmin: 0, xmax: a.duration_s, steps });
+  if (S.newRecords) { showRecords(S.newRecords); S.newRecords = null; }
 
   const save = async (body) => { await api(`/api/activities/${a.id}`, { method: "PATCH", body: JSON.stringify(body) }); toast("Salvo"); };
   const title = $("#title");
@@ -639,6 +977,10 @@ async function viewSettings(el) {
         <div class="field"><label for="s-wheel">Distância por volta do pedal (m)</label>
           <input class="input" id="s-wheel" type="number" min="0" max="20" step="0.1" value="${cfg.wheel_m}">
           <span class="help">Converte voltas em km. ~6 m equivale a uma marcha média numa bike de rua; 0 esconde distância e velocidade.</span></div>
+        <div class="field"><label>Avisos durante o treino</label>
+          <label class="check"><input type="checkbox" id="s-sound" ${cfg.sound ? "checked" : ""}> Bipes na troca de etapa e contagem 3-2-1</label>
+          <label class="check"><input type="checkbox" id="s-voice" ${cfg.voice ? "checked" : ""}> Voz anunciando etapa, duração e faixa de rpm</label>
+          <div><button class="btn" id="s-test" type="button">Testar avisos</button></div></div>
       </div></div>
 
       <div class="card"><h2>Sensor</h2><div class="form">
@@ -661,11 +1003,20 @@ async function viewSettings(el) {
     <div class="actions" style="margin-top:20px;justify-content:flex-end"><button class="btn primary" id="save">Salvar ajustes</button></div>`;
 
   $("#s-thr").oninput = updateMeter;
+  $("#s-test").onclick = () => {
+    Cues.unlock();
+    const prev = S.settings;
+    S.settings = { ...prev, sound: $("#s-sound").checked, voice: $("#s-voice").checked };
+    Cues.stepStart({ name: "Sprint", seconds: 30, lo: 95, hi: 115 });
+    [3, 2, 1].forEach((n, i) => Cues.beep(880, 110, 2 + i));
+    S.settings = prev;
+  };
   updateMeter();
   $("#save").onclick = async () => {
     const dev = $("#s-dev").value;
     const body = {
       name: $("#s-name").value.trim(), weight_kg: +$("#s-weight").value, weekly_goal_min: +$("#s-goal").value,
+      sound: $("#s-sound").checked, voice: $("#s-voice").checked,
       wheel_m: +$("#s-wheel").value,
     };
     if (!busy) Object.assign(body, { device: dev === "" ? null : +dev, threshold: +$("#s-thr").value,

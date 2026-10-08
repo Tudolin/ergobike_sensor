@@ -16,6 +16,7 @@ from .audio import PulseSource, ReplaySource, default_device
 from .cadence import IDLE_S, CadenceTracker
 from .pulses import POLARITIES, EdgeDetector, calibrate
 from .storage import Database
+from .workouts import BUILTIN, Goal, PlanTracker, Workout
 
 FLUSH_S = 10.0
 TICK_S = 0.25
@@ -63,6 +64,8 @@ class Recorder:
         self.session_id: int | None = None
         self.tracker: CadenceTracker | None = None
         self.stats: LiveStats | None = None
+        self.workout: Workout | None = None
+        self.plan: PlanTracker | None = None
         self.t_start = 0.0
         self.paused_total = 0.0
         self.paused_at: float | None = None
@@ -126,7 +129,7 @@ class Recorder:
     def _ride_time(self, stream_t: float) -> float:
         return stream_t - self.t_start - self.paused_total
 
-    def begin(self) -> int:
+    def begin(self, workout: Workout | None = None) -> int:
         with self.lock:
             if self.state != "idle":
                 return self.session_id
@@ -136,9 +139,11 @@ class Recorder:
             ppr = int(cfg["pulses_per_rev"])
             self.tracker = CadenceTracker(ppr)
             self.stats = LiveStats(ppr)
+            self.workout = workout or BUILTIN["free"]
+            self.plan = PlanTracker(self.workout) if self.workout.structured else None
             self.session_id = self.db.start_session(
                 "replay" if self.replay else str(cfg["device"]), ppr,
-                float(cfg["wheel_m"]), float(cfg["weight_kg"]))
+                float(cfg["wheel_m"]), float(cfg["weight_kg"]), self.workout)
             self.t_start = self.source.stream_time
             self.paused_total, self.paused_at = 0.0, None
             self.pending = []
@@ -211,8 +216,11 @@ class Recorder:
         if self.state != "running":
             return
         t = self._ride_time(stream_t)
+        prev = self.tracker.last_t
         rev = self.tracker.add_pulse(t)
         self.stats.add(t)
+        if self.plan and prev is not None and t - prev < IDLE_S:
+            self.plan.add_interval(t, t - prev, rev.rpm_inst)
         self.pending.append((rev.t, rev.rev, rev.rpm_inst, rev.rpm_avg))
         if rev.rpm_avg is not None:
             self.live_points.append((round(t, 1), round(rev.rpm_avg, 1)))
@@ -261,5 +269,21 @@ class Recorder:
             "kcal": estimate_kcal(avg, float(cfg["weight_kg"]), self.stats.moving_s),
             "zones": self.stats.zones(),
             "live": list(self.live_points),
+            "workout": self._workout_info(),
+            "plan": self.plan.state(now, rpm) if self.plan else None,
+            "goal": self._goal_progress(now, revs * wheel / 1000),
         })
         return snap
+
+    def _workout_info(self) -> dict:
+        w = self.workout
+        return {"id": w.id, "name": w.name, "duration_s": w.duration,
+                "steps": [s.__dict__ for s in w.steps]} if w else {}
+
+    def _goal_progress(self, elapsed: float, km: float) -> dict | None:
+        goal: Goal | None = self.workout.goal if self.workout else None
+        if goal is None:
+            return None
+        done = elapsed if goal.type == "time" else km
+        return {"type": goal.type, "value": goal.value, "done": round(done, 3),
+                "progress": min(1.0, done / goal.value) if goal.value else 1.0}
