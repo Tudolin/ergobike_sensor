@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .audio import input_devices
+from .heartrate import PULSOID_VALIDATE, PULSOID_WS, validate_token
 from .recorder import Recorder
 from .storage import Database
 from .workouts import BUILTIN, Goal, intervals
@@ -48,15 +49,20 @@ class IntervalWorkoutRequest(BaseModel):
     cooldown_s: int = Field(default=300, ge=0, le=3600)
 
 
+class TokenRequest(BaseModel):
+    token: str | None = None
+
+
 class FinishRequest(BaseModel):
     save: bool = True
     title: str | None = None
     notes: str | None = None
 
 
-def create_app(db_path: Path, replay: str | None = None) -> FastAPI:
+def create_app(db_path: Path, replay: str | None = None, hr_url: str = PULSOID_WS,
+               hr_validate_url: str = PULSOID_VALIDATE, hr_token: str | None = None) -> FastAPI:
     db = Database(str(db_path))
-    recorder = Recorder(db, replay=replay)
+    recorder = Recorder(db, replay=replay, hr_url=hr_url, hr_token=hr_token)
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -157,6 +163,8 @@ def create_app(db_path: Path, replay: str | None = None) -> FastAPI:
     def put_settings(values: dict):
         before = db.settings()
         after = db.update_settings(values)
+        if before["pulsoid_token"] != after["pulsoid_token"]:
+            recorder.open_heart_rate()
         if any(before[k] != after[k] for k in AUDIO_SETTINGS):
             try:
                 recorder.open_source()
@@ -164,6 +172,15 @@ def create_app(db_path: Path, replay: str | None = None) -> FastAPI:
                 db.update_settings({k: before[k] for k in AUDIO_SETTINGS})
                 raise conflict(e) from e
         return after
+
+    @app.post("/api/heart-rate/test")
+    def heart_rate_test(body: TokenRequest):
+        token = (body.token or hr_token or db.settings()["pulsoid_token"] or "").strip()
+        if not token:
+            return {"ok": False, "scopes": [], "message": "Informe o token do Pulsoid"}
+        if hr_token:
+            return {"ok": True, "scopes": ["data:heart_rate:read"], "message": "Modo demonstração"}
+        return validate_token(token, hr_validate_url)
 
     @app.post("/api/calibrate")
     def calibrate(seconds: float = 10.0):

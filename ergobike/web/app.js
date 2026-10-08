@@ -96,6 +96,7 @@ const ICON = {
   download: I('<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>'),
   trash: I('<path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/>'),
   trophy: I('<path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0zM17 5h3v2a3 3 0 0 1-3 3M7 5H4v2a3 3 0 0 0 3 3"/>', 'width="12" height="12"'),
+  heart: I('<path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z" fill="currentColor" stroke="none"/>'),
   expand: I('<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'),
   trophyBig: I('<path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0zM17 5h3v2a3 3 0 0 1-3 3M7 5H4v2a3 3 0 0 0 3 3"/>', 'width="40" height="40"'),
   wave: I('<path d="M2 12h3l2-6 4 12 3-9 2 3h6"/>'),
@@ -181,6 +182,17 @@ function updateSideStatus() {
   } else {
     el.innerHTML = sensorPill(l);
   }
+  if (l && l.hr && l.hr.status !== "off") el.innerHTML += `<div style="margin-top:8px">${hrPill(l.hr)}</div>`;
+}
+
+const HR_STATUS = {
+  connecting: "Conectando ao Pulsoid…", waiting: "Relógio sem leitura", unauthorized: "Token do Pulsoid recusado",
+  error: "Pulsoid indisponível", connected: "",
+};
+
+function hrPill(hr) {
+  if (hr.bpm) return `<span class="pill hr-pill"><span class="heart-ico beat">${ICON.heart}</span><b class="num">${hr.bpm}</b> bpm${hr.zone ? ` · ${hr.zone}` : ""}</span>`;
+  return `<span class="pill hr-pill"><span class="heart-ico">${ICON.heart}</span>${HR_STATUS[hr.status] || "Sem frequência"}</span>`;
 }
 
 // ---- charts
@@ -201,7 +213,7 @@ const avgLinePlugin = {
     ctx.strokeStyle = opts.color; ctx.setLineDash([5, 4]); ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.moveTo(a.left, py); ctx.lineTo(a.right, py); ctx.stroke();
     ctx.setLineDash([]);
-    const label = `média ${fmt.rpm(opts.value)} rpm`;
+    const label = `média ${fmt.rpm(opts.value)} ${opts.unit || "rpm"}`;
     ctx.font = `600 12px ${opts.font}`;
     const w = ctx.measureText(label).width + 12;
     ctx.fillStyle = opts.bg; ctx.fillRect(a.right - w, py - 20, w, 16);
@@ -250,11 +262,12 @@ const bandsPlugin = {
 
 function cadenceChart(canvas, points, avg, opts = {}) {
   const th = chartTheme();
+  const color = opts.color || th.series, fill = opts.fill || th.soft, unit = opts.unit || "rpm";
   const chart = new Chart(canvas, {
     type: "line",
     data: { datasets: [{
-      data: points, parsing: false, borderColor: th.series, backgroundColor: th.soft,
-      borderWidth: 2, pointRadius: 0, pointHoverRadius: 5, pointHoverBackgroundColor: th.series,
+      data: points, parsing: false, borderColor: color, backgroundColor: fill,
+      borderWidth: 2, pointRadius: 0, pointHoverRadius: 5, pointHoverBackgroundColor: color,
       pointHoverBorderColor: th.surface, pointHoverBorderWidth: 2, fill: "origin", tension: 0.25,
     }] },
     options: {
@@ -265,17 +278,17 @@ function cadenceChart(canvas, points, avg, opts = {}) {
         x: { type: "linear", min: opts.xmin, max: opts.xmax, grid: { display: false },
           border: { color: th.grid },
           ticks: { color: th.muted, maxTicksLimit: 8, callback: (v) => fmt.dur(v), font: { family: th.font } } },
-        y: { min: 0, suggestedMax: 110, grid: { color: th.grid }, border: { display: false },
+        y: { min: opts.ymin ?? 0, suggestedMax: opts.ymax ?? 110, grid: { color: th.grid }, border: { display: false },
           ticks: { color: th.muted, maxTicksLimit: 6, font: { family: th.font } } },
       },
       plugins: {
         legend: { display: false },
-        avgLine: { value: avg, color: th.ink2, bg: th.surface, font: th.font },
+        avgLine: { value: avg, color: th.ink2, bg: th.surface, font: th.font, unit },
         bands: { steps: opts.steps || [] },
         tooltip: {
           backgroundColor: th.surface, titleColor: th.muted, bodyColor: th.ink, borderColor: th.grid,
           borderWidth: 1, padding: 10, displayColors: false, bodyFont: { weight: "600", size: 14 },
-          callbacks: { title: (it) => fmt.dur(it[0].parsed.x), label: (it) => `${fmt.rpm(it.parsed.y)} rpm` },
+          callbacks: { title: (it) => fmt.dur(it[0].parsed.x), label: (it) => `${fmt.rpm(it.parsed.y)} ${unit}` },
         },
       },
     },
@@ -326,13 +339,18 @@ function metric(label, value, unit = "", id = "") {
     <div class="value"${id ? ` id="${id}"` : ""}>${value}${unit ? `<small>${unit}</small>` : ""}</div></div>`;
 }
 
+function heartChart(canvas, points, avg, opts = {}) {
+  return cadenceChart(canvas, points, avg, { ...opts, unit: "bpm", color: cssv("--heart"),
+    fill: cssv("--heart-soft"), ymin: 60, ymax: 180 });
+}
+
 function zonesBar(zones) {
   const total = zones.reduce((a, z) => a + z.seconds, 0);
   const bar = total
     ? zones.map((z) => `<span style="flex-grow:${z.seconds};background:${zoneVar(z.id)}" title="${z.id} ${z.name}: ${fmt.dur(z.seconds)}"></span>`).join("")
     : `<span style="flex-grow:1;background:var(--surface-2)"></span>`;
   const legend = zones.map((z) => `<div><b><i class="sw" style="background:${zoneVar(z.id)}"></i>${z.id} ${fmt.dur(z.seconds)}</b>
-    <span>${z.name} · ${z.hi ? `${z.lo}–${z.hi}` : `${z.lo}+`}</span></div>`).join("");
+    <span>${z.name} · ${z.hi ? `${z.lo}–${z.hi}` : `${z.lo}+`}${z.unit ? ` ${z.unit}` : ""}</span></div>`).join("");
   return `<div class="zone-bar">${bar}</div><div class="zone-legend">${legend}</div>`;
 }
 
@@ -611,7 +629,8 @@ function renderActive(el) {
     <div id="goal-card"></div>
     <div class="card hero" style="margin-top:16px">
       <div><div class="hero-rpm" id="rpm">0</div>
-        <div class="hero-unit">rpm <span class="zone-chip" id="zone"></span></div></div>
+        <div class="hero-unit">rpm <span class="zone-chip" id="zone"></span></div>
+        ${l.hr && l.hr.status !== "off" ? `<div class="hero-hr" id="hero-hr"></div>` : ""}</div>
       <div class="metrics">
         ${metric("Tempo", "0:00", "", "m-time")}
         ${metric("Distância", "0,00", "km", "m-dist")}
@@ -624,13 +643,18 @@ function renderActive(el) {
     <div class="card" style="margin-top:16px"><div class="card-head"><h2>Cadência <span class="hint">últimos 10 min</span></h2>
       <span class="sub num" id="moving" style="color:var(--muted);font-size:13px"></span></div>
       <div class="chart-box"><canvas id="live-chart" aria-label="Cadência ao vivo"></canvas></div></div>
-    <div class="card" style="margin-top:16px"><h2>Tempo em cada zona</h2><div id="zones"></div></div>
+    ${l.hr && l.hr.status !== "off" ? `<div class="card" style="margin-top:16px"><div class="card-head"><h2>Frequência cardíaca <span class="hint">últimos 10 min</span></h2>
+      <span class="sub num" id="hr-stats" style="color:var(--muted);font-size:13px"></span></div>
+      <div class="chart-box short"><canvas id="hr-chart" aria-label="Frequência cardíaca ao vivo"></canvas></div>
+      <div id="hr-zones" style="margin-top:14px"></div></div>` : ""}
+    <div class="card" style="margin-top:16px"><h2>Tempo em cada zona <span class="hint">cadência</span></h2><div id="zones"></div></div>
     <div class="controls" style="margin-top:24px">
       <button class="btn round" id="pause" title="Pausar (espaço)"></button>
       <button class="btn primary" id="finish" style="height:52px;padding:0 28px">${ICON.stop} Finalizar</button>
     </div>
     <div class="kbd-hint">Espaço pausa · F modo foco</div>`;
   S.liveChart = cadenceChart($("#live-chart"), [], 0, { steps: structured ? w.steps : [] });
+  S.hrChart = $("#hr-chart") ? heartChart($("#hr-chart"), [], 0) : null;
   $("#pause").onclick = togglePause;
   $("#finish").onclick = finishDialog;
   $("#focus").onclick = toggleFocus;
@@ -710,12 +734,35 @@ function patchActive(l) {
       <div class="goal-bar"><i style="width:${(100 * g.progress).toFixed(1)}%"></i></div></div>` : "";
   }
   $("#zones").innerHTML = zonesBar(l.zones);
+  patchHeart(l);
   const c = S.liveChart;
   if (c) {
     c.data.datasets[0].data = l.live.map(([x, y]) => ({ x, y }));
     c.options.scales.x.min = Math.max(0, l.elapsed_s - 600);
     c.options.scales.x.max = Math.max(60, l.elapsed_s);
     c.options.plugins.avgLine.value = l.avg_rpm;
+    c.update("none");
+  }
+}
+
+function patchHeart(l) {
+  const hr = l.hr || {}, box = $("#hero-hr");
+  if (box) {
+    box.innerHTML = hr.bpm
+      ? `<span class="heart-ico beat">${ICON.heart}</span><b class="num">${hr.bpm}</b><small>bpm</small>${hr.zone ? `<span class="zone-chip"><i style="background:${zoneVar(hr.zone)}"></i>FC ${hr.zone} · ${hr.pct_max}% máx</span>` : ""}`
+      : `<span class="heart-ico">${ICON.heart}</span><span class="muted">${HR_STATUS[hr.status] || "sem leitura"}</span>`;
+  }
+  if (!hr.live) return;
+  const st = $("#hr-stats");
+  if (st) st.textContent = `média ${hr.avg} · máx ${hr.max} · carga ${fmt.dec(hr.trimp)}`;
+  const z = $("#hr-zones");
+  if (z) z.innerHTML = zonesBar(hr.zones.map((x) => ({ ...x, unit: "bpm" })));
+  const c = S.hrChart;
+  if (c) {
+    c.data.datasets[0].data = hr.live.map(([x, y]) => ({ x, y }));
+    c.options.scales.x.min = Math.max(0, l.elapsed_s - 600);
+    c.options.scales.x.max = Math.max(60, l.elapsed_s);
+    c.options.plugins.avgLine.value = hr.avg;
     c.update("none");
   }
 }
@@ -830,16 +877,27 @@ async function viewDetail(el, id) {
       ${metric("Distância", hasDist ? fmt.km(a.distance_km) : "—", hasDist ? "km" : "")}
       ${metric("Tempo em movimento", fmt.dur(a.moving_s))}
       ${metric("Cadência média", fmt.rpm(a.avg_rpm), "rpm")}
-      ${metric("Calorias (estim.)", fmt.int(a.kcal), "kcal")}
+      ${metric(a.heart && a.heart.kcal_from_hr ? "Calorias (FC)" : "Calorias (estim.)", fmt.int(a.kcal), "kcal")}
       ${metric("Tempo total", fmt.dur(a.duration_s))}
       ${metric("Cadência máx", fmt.rpm(a.max_rpm), "rpm")}
       ${metric("Velocidade média", hasDist ? fmt.dec(speed) : "—", hasDist ? "km/h" : "")}
       ${metric("Voltas", fmt.int(a.revs))}
+      ${a.heart ? `${metric("FC média", a.heart.avg, "bpm")}${metric("FC máxima", a.heart.max, "bpm")}
+        ${metric("Carga (TRIMP)", fmt.dec(a.heart.trimp))}${metric("Deriva cardíaca", a.heart.drift_pct == null ? "—" : fmt.dec(a.heart.drift_pct), a.heart.drift_pct == null ? "" : "%")}` : ""}
     </div>
     <textarea class="input" id="notes" placeholder="Adicione uma anotação…" style="margin-top:16px;min-height:60px">${esc(a.notes || "")}</textarea></div>
 
     <div class="card" style="margin-top:16px"><h2>Cadência</h2>
       <div class="chart-box tall"><canvas id="c-detail" aria-label="Cadência ao longo do treino"></canvas></div></div>
+
+    ${a.heart ? `<div class="card" style="margin-top:16px"><div class="card-head"><h2>Frequência cardíaca</h2>
+      <span class="sub" style="color:var(--muted);font-size:13px">FC máx considerada ${a.heart.max_hr} bpm${a.heart.kcal_from_hr ? " · calorias calculadas pela FC" : ""}</span></div>
+      <div class="chart-box"><canvas id="c-heart" aria-label="Frequência cardíaca ao longo do treino"></canvas></div>
+      <div style="margin-top:12px">${a.heart.zones.map((z) => `<div class="zrow hr"><div><b>${z.id}</b> <span class="muted">${z.name}</span></div>
+          <div class="track"><div class="fill" style="width:${z.pct}%;background:${zoneVar(z.id)}"></div></div>
+          <div class="r">${fmt.dur(z.seconds)}</div><div class="r muted">${z.hi ? `${z.lo}–${z.hi}` : `${z.lo}+`}</div></div>`).join("")}</div>
+      ${a.heart.drift_pct != null ? `<div class="callout" style="margin-top:12px">Deriva cardíaca de <b>${fmt.dec(a.heart.drift_pct)}%</b>: ${a.heart.drift_pct < 5 ? "o coração acompanhou a cadência do começo ao fim, esforço sustentável." : "a FC subiu mais que a cadência na segunda metade (cansaço, calor ou pouca hidratação)."}</div>` : ""}
+    </div>` : ""}
 
     <div class="grid cols-2" style="margin-top:16px">
       <div class="card"><h2>Zonas de cadência</h2>
@@ -856,11 +914,12 @@ async function viewDetail(el, id) {
     </div>
 
     ${results.length ? `<div class="card" style="margin-top:16px"><h2>Etapas do treino <span class="hint">tempo dentro da faixa alvo</span></h2>
-      <table class="tbl"><thead><tr><th>#</th><th>Etapa</th><th class="r">Duração</th><th class="r">Alvo</th><th class="r">Média</th><th class="r">No alvo</th><th class="barcell"></th></tr></thead>
+      <table class="tbl"><thead><tr><th>#</th><th>Etapa</th><th class="r">Duração</th><th class="r">Alvo</th><th class="r">Média</th><th class="r">No alvo</th>${a.heart ? `<th class="r">FC</th><th class="r" title="Queda da FC no primeiro minuto do descanso">Recup.</th>` : ""}<th class="barcell"></th></tr></thead>
       <tbody>${results.map((r, i) => `<tr class="${r.kind === "work" ? "work-row" : ""}"><td>${i + 1}</td>
         <td><i class="sw" style="background:${zoneVar(zoneOf(r.lo).id)}"></i>${esc(r.name)}</td>
         <td class="r">${fmt.dur(r.seconds)}</td><td class="r">${r.lo}–${r.hi}</td><td class="r"><b>${fmt.rpm(r.avg_rpm)}</b></td>
         <td class="r">${r.in_target_pct}%</td>
+        ${a.heart ? `<td class="r">${r.avg_hr ?? "—"}</td><td class="r">${r.hr_drop == null ? "" : r.hr_drop > 0 ? `−${r.hr_drop}` : r.hr_drop < 0 ? `+${-r.hr_drop}` : "0"}</td>` : ""}
         <td class="barcell"><div class="hbar" style="width:${r.in_target_pct}%"></div></td></tr>`).join("")}</tbody></table></div>` : ""}
 
     <div class="card" style="margin-top:16px"><h2>Parciais <span class="hint">por ${a.splits.unit}</span></h2>
@@ -872,6 +931,10 @@ async function viewDetail(el, id) {
 
   const pts = a.series.t.map((x, i) => ({ x, y: a.series.rpm[i] }));
   cadenceChart($("#c-detail"), pts, a.avg_rpm, { xmin: 0, xmax: a.duration_s, steps });
+  if (a.heart) {
+    const hp = a.heart.series.t.map((x, i) => ({ x, y: a.heart.series.bpm[i] }));
+    heartChart($("#c-heart"), hp, a.heart.avg, { xmin: 0, xmax: a.duration_s });
+  }
   if (S.newRecords) { showRecords(S.newRecords); S.newRecords = null; }
 
   const save = async (body) => { await api(`/api/activities/${a.id}`, { method: "PATCH", body: JSON.stringify(body) }); toast("Salvo"); };
@@ -907,7 +970,7 @@ async function viewProgress(el) {
         <div class="label" style="margin-top:4px">seguidas com pelo menos um treino</div></div></div>
     </div>
     <div class="card" style="margin-top:16px"><div class="card-head"><h2>Volume semanal</h2>
-      <div class="segmented" id="seg"><button data-k="time" class="on">Tempo</button><button data-k="dist">Distância</button><button data-k="count">Treinos</button></div></div>
+      <div class="segmented" id="seg"><button data-k="time" class="on">Tempo</button><button data-k="dist">Distância</button><button data-k="count">Treinos</button>${st.weeks.some((w) => w.trimp) ? `<button data-k="load">Carga</button>` : ""}</div></div>
       <div class="chart-box short"><canvas id="c-weeks" aria-label="Volume semanal"></canvas></div></div>
     <div class="card" style="margin-top:16px"><h2>Calendário <span class="hint">últimas 16 semanas</span></h2>
       <div class="heat" id="heat"></div>
@@ -933,6 +996,7 @@ async function viewProgress(el) {
     time: [st.weeks.map((w) => w.moving_s / 60), (v) => nf0.format(v), "min"],
     dist: [st.weeks.map((w) => w.distance_km), (v) => nf1.format(v), "km"],
     count: [st.weeks.map((w) => w.count), (v) => nf0.format(v), "treinos"],
+    load: [st.weeks.map((w) => w.trimp), (v) => nf0.format(v), "TRIMP"],
   };
   let chart = barChart($("#c-weeks"), labels, ...series.time);
   $$("#seg button").forEach((b) => (b.onclick = () => {
@@ -1000,9 +1064,47 @@ async function viewSettings(el) {
         <div id="cal-out"></div>
       </div></div>
     </div>
+    <div class="card" style="margin-top:16px"><h2>Frequência cardíaca <span class="hint">relógio Wear OS via Pulsoid</span></h2>
+      <div class="grid cols-2">
+        <div class="form">
+          <div class="field"><label>Status</label><div id="hr-status">${hrPill(S.live?.hr || { status: "off" })}</div></div>
+          <div class="field"><label for="s-token">Token do Pulsoid</label>
+            <div class="token-row"><input class="input" id="s-token" type="password" autocomplete="off" value="${esc(cfg.pulsoid_token)}" placeholder="cole aqui o token">
+            <button class="btn" id="s-token-test" type="button">Testar</button></div>
+            <span class="help" id="s-token-msg"></span></div>
+          <div class="form-row">
+            <div class="field"><label for="s-age">Idade</label><input class="input" id="s-age" type="number" min="10" max="100" value="${cfg.age}"></div>
+            <div class="field"><label for="s-sex">Sexo</label><select class="input" id="s-sex">
+              <option value="m" ${cfg.sex === "m" ? "selected" : ""}>Masculino</option><option value="f" ${cfg.sex === "f" ? "selected" : ""}>Feminino</option></select></div>
+          </div>
+          <div class="form-row">
+            <div class="field"><label for="s-hrmax">FC máxima</label><input class="input" id="s-hrmax" type="number" min="120" max="230" value="${cfg.hr_max ?? ""}" placeholder="auto: ${Math.round(208 - 0.7 * cfg.age)}">
+              <span class="help">Vazio usa 208 − 0,7 × idade.</span></div>
+            <div class="field"><label for="s-hrrest">FC de repouso</label><input class="input" id="s-hrrest" type="number" min="30" max="110" value="${cfg.hr_rest}"></div>
+          </div>
+        </div>
+        <div class="callout hr-help">
+          <b>Como conectar</b>
+          <ol>
+            <li>Instale o app Pulsoid no celular Android e entre com sua conta de pulsoid.net.</li>
+            <li>Abra o Pulsoid no relógio Wear OS e comece a medir.</li>
+            <li>Em <b>pulsoid.net/ui/keys</b>, crie um token com o escopo <code>data:heart_rate:read</code> (recurso do plano BRO, tem período de teste).</li>
+            <li>Cole o token aqui, clique em Testar e depois em Salvar.</li>
+          </ol>
+          Com FC o app calcula zonas cardíacas, calorias pela fórmula de Keytel, carga de treino (TRIMP), deriva cardíaca e a recuperação entre os tiros. O TCX exportado leva a FC para o Strava.
+        </div>
+      </div>
+    </div>
     <div class="actions" style="margin-top:20px;justify-content:flex-end"><button class="btn primary" id="save">Salvar ajustes</button></div>`;
 
   $("#s-thr").oninput = updateMeter;
+  $("#s-token-test").onclick = async () => {
+    const msg = $("#s-token-msg");
+    msg.textContent = "Verificando…";
+    const r = await api("/api/heart-rate/test", { method: "POST", body: JSON.stringify({ token: $("#s-token").value.trim() }) });
+    msg.textContent = r.ok ? `${r.message}. Clique em Salvar para conectar.` : r.message;
+    msg.style.color = r.ok ? "var(--good)" : "var(--danger)";
+  };
   $("#s-test").onclick = () => {
     Cues.unlock();
     const prev = S.settings;
@@ -1017,6 +1119,8 @@ async function viewSettings(el) {
     const body = {
       name: $("#s-name").value.trim(), weight_kg: +$("#s-weight").value, weekly_goal_min: +$("#s-goal").value,
       sound: $("#s-sound").checked, voice: $("#s-voice").checked,
+      pulsoid_token: $("#s-token").value.trim(), age: +$("#s-age").value || 30, sex: $("#s-sex").value,
+      hr_max: $("#s-hrmax").value ? +$("#s-hrmax").value : null, hr_rest: +$("#s-hrrest").value || 60,
       wheel_m: +$("#s-wheel").value,
     };
     if (!busy) Object.assign(body, { device: dev === "" ? null : +dev, threshold: +$("#s-thr").value,
@@ -1049,6 +1153,8 @@ async function viewSettings(el) {
 }
 
 function updateMeter() {
+  const hs = $("#hr-status");
+  if (hs && S.live) hs.innerHTML = hrPill(S.live.hr || { status: "off" });
   const lvl = $("#lvl"), thr = $("#thr"), inp = $("#s-thr");
   if (!lvl || !inp) return;
   const v = S.live?.step_level || 0;

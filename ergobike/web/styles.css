@@ -13,6 +13,8 @@
   --series-soft: rgba(42, 120, 214, 0.12);
   --grid: #ecebe7;
   --good: #0ca30c;
+  --heart: #e34948;
+  --heart-soft: rgba(227, 73, 72, 0.12);
   --danger: #d03b3b;
   /* cadence zones: sequential blue ramp, light to dark */
   --z1: #9ec5f4; --z2: #6da7ec; --z3: #3987e5; --z4: #256abf; --z5: #184f95;
@@ -30,6 +32,7 @@
     --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
     --accent: #ff6a2b; --accent-ink: #ffffff; --accent-soft: #3a2015;
     --series: #3987e5; --series-soft: rgba(57, 135, 229, 0.18); --grid: #2a2a28;
+    --heart: #e66767; --heart-soft: rgba(230, 103, 103, 0.16);
     --z1: #184f95; --z2: #256abf; --z3: #3987e5; --z4: #6da7ec; --z5: #9ec5f4;
     --heat-0: #262624; --heat-1: #184f95; --heat-2: #256abf; --heat-3: #3987e5; --heat-4: #86b6ef;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
@@ -41,6 +44,7 @@
   --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
   --accent: #ff6a2b; --accent-ink: #ffffff; --accent-soft: #3a2015;
   --series: #3987e5; --series-soft: rgba(57, 135, 229, 0.18); --grid: #2a2a28;
+  --heart: #e66767; --heart-soft: rgba(230, 103, 103, 0.16);
   --z1: #184f95; --z2: #256abf; --z3: #3987e5; --z4: #6da7ec; --z5: #9ec5f4;
   --heat-0: #262624; --heat-1: #184f95; --heat-2: #256abf; --heat-3: #3987e5; --heat-4: #86b6ef;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
@@ -228,6 +232,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
 
 .zrow { display: grid; grid-template-columns: 92px 1fr 64px 48px; gap: 12px; align-items: center;
   padding: 7px 0; font-size: 14px; }
+.zrow.hr { grid-template-columns: 110px 1fr 56px 84px; }
 .zrow .track { height: 10px; background: var(--surface-2); border-radius: 5px; overflow: hidden; }
 .zrow .fill { height: 100%; border-radius: 5px; }
 .zrow .r { text-align: right; font-variant-numeric: tabular-nums; }
@@ -360,6 +365,20 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
 .rec-row .t { font-weight: 600; }
 .rec-row .d { color: var(--muted); font-size: 12.5px; }
 .rec-row .v { grid-row: span 2; align-self: center; font-weight: 650; font-size: 20px; font-variant-numeric: tabular-nums; }
+
+/* ---- heart rate */
+.heart-ico { display: inline-flex; color: var(--heart); }
+.heart-ico svg { width: 16px; height: 16px; }
+.heart-ico.beat { animation: beat 1s infinite; }
+@keyframes beat { 0%, 100% { transform: scale(1); } 15% { transform: scale(1.22); } 30% { transform: scale(1); } }
+.hr-pill b { color: var(--ink); }
+.hero-hr { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: 14px; color: var(--muted); flex-wrap: wrap; }
+.hero-hr b { font-family: var(--font-display); font-size: 40px; color: var(--ink); line-height: 1; letter-spacing: -0.02em; }
+.hero-hr .heart-ico svg { width: 26px; height: 26px; }
+.hero-hr .muted { color: var(--muted); }
+.token-row { display: flex; gap: 8px; }
+.hr-help ol { margin: 8px 0 10px; padding-left: 20px; display: grid; gap: 4px; }
+.hr-help code { font-size: 12.5px; background: var(--surface); padding: 1px 5px; border-radius: 4px; }
 
 /* ---- focus mode: hide the chrome, make the numbers huge */
 body.focus .sidebar, body.focus .kbd-hint, body.focus .page-head h1 { display: none; }

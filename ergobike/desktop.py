@@ -85,8 +85,14 @@ class ServerThread:
 
 
 class DesktopApp:
-    def __init__(self, db_path: Path, replay: str | None = None):
-        self.app = create_app(db_path, replay)
+    def __init__(self, db_path: Path, replay: str | None = None, demo_hr: bool = False):
+        self._fake_hr = None
+        hr = {}
+        if demo_hr:
+            from .demo_hr import FakePulsoid
+            self._fake_hr = FakePulsoid().start()
+            hr = {"hr_url": self._fake_hr.url, "hr_token": self._fake_hr.token}
+        self.app = create_app(db_path, replay, **hr)
         self.recorder = self.app.state.recorder
         self.server = ServerThread(self.app, free_port())
         self.window = None
@@ -142,7 +148,8 @@ class _Api:
         self._app.close_app(save)
 
 
-def main(db: str | None = None, replay: str | None = None, browser: bool = False) -> int:
+def main(db: str | None = None, replay: str | None = None, browser: bool = False,
+         demo_hr: bool = False) -> int:
     ddir = data_dir()
     logging.basicConfig(filename=ddir / "ergobike.log", level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -152,4 +159,4 @@ def main(db: str | None = None, replay: str | None = None, browser: bool = False
         return 0
     db_path = Path(db) if db else ddir / "treinos.db"
     log.info("starting, db=%s replay=%s", db_path, replay)
-    return DesktopApp(db_path, replay).run(browser=browser)
+    return DesktopApp(db_path, replay, demo_hr).run(browser=browser)

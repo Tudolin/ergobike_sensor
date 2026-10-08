@@ -5,7 +5,7 @@ import sqlite3
 import threading
 from datetime import date, datetime, timedelta
 
-from .analysis import BEST_WINDOWS, Ride, default_title
+from .analysis import BEST_WINDOWS, Athlete, HeartRateSeries, Ride, default_title
 from .workouts import BUILTIN, Workout
 
 SCHEMA = """
@@ -32,22 +32,30 @@ CREATE TABLE IF NOT EXISTS revs (
 CREATE INDEX IF NOT EXISTS revs_session ON revs(session_id, t_s);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS workouts (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS heart_rate (
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    t_s        REAL NOT NULL,
+    bpm        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS heart_rate_session ON heart_rate(session_id, t_s);
 """
 
 # columns added after the first version; older databases get them via ALTER TABLE
 MIGRATIONS = {
     "title": "TEXT", "notes": "TEXT", "weight_kg": "REAL", "moving_s": "REAL",
     "kcal": "REAL", "bests": "TEXT", "sparkline": "TEXT", "workout": "TEXT",
+    "avg_hr": "REAL", "max_hr": "REAL", "trimp": "REAL", "athlete": "TEXT",
 }
 
 DEFAULT_SETTINGS = {
     "name": "", "device": None, "threshold": 0.1, "edge": "close", "pulses_per_rev": 1,
     "wheel_m": 6.0, "weight_kg": 75.0, "weekly_goal_min": 150, "sound": True, "voice": True,
+    "age": 30, "sex": "m", "hr_max": None, "hr_rest": 60, "pulsoid_token": "",
 }
 
 SUMMARY_COLUMNS = ("id, started_at, ended_at, title, notes, duration_s, moving_s, revs, avg_rpm,"
                    " max_rpm, distance_km, kcal, bests, sparkline, wheel_m, pulses_per_rev,"
-                   " weight_kg, workout")
+                   " weight_kg, workout, avg_hr, max_hr, trimp")
 
 
 class Database:
@@ -113,7 +121,7 @@ class Database:
 
     # ---- recording
     def start_session(self, device: str, ppr: int, wheel_m: float, weight_kg: float,
-                      workout: Workout | None = None) -> int:
+                      workout: Workout | None = None, athlete: Athlete | None = None) -> int:
         now = datetime.now()
         title = default_title(now)
         if workout and workout.structured:
@@ -121,9 +129,10 @@ class Database:
         with self.lock:
             cur = self.db.execute(
                 "INSERT INTO sessions (started_at, device, pulses_per_rev, wheel_m, weight_kg, title,"
-                " workout) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " workout, athlete) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (now.isoformat(timespec="seconds"), device, ppr, wheel_m, weight_kg, title,
-                 json.dumps(workout.to_dict()) if workout else None))
+                 json.dumps(workout.to_dict()) if workout else None,
+                 json.dumps(athlete.__dict__) if athlete else None))
             self.db.commit()
         return cur.lastrowid
 
@@ -135,6 +144,13 @@ class Database:
                                 [(sid, *r) for r in rows])
             self.db.commit()
 
+    def add_heart_rate(self, sid: int, rows: list[tuple[float, int]]) -> None:
+        if not rows:
+            return
+        with self.lock:
+            self.db.executemany("INSERT INTO heart_rate VALUES (?, ?, ?)", [(sid, *r) for r in rows])
+            self.db.commit()
+
     def pulse_times(self, sid: int) -> list[float]:
         with self.lock:
             return [r[0] for r in self.db.execute(
@@ -142,26 +158,30 @@ class Database:
 
     def _ride(self, sid: int, duration: float | None = None) -> Ride | None:
         with self.lock:
-            s = self.db.execute("SELECT pulses_per_rev, wheel_m, weight_kg, duration_s"
+            s = self.db.execute("SELECT pulses_per_rev, wheel_m, weight_kg, duration_s, athlete"
                                 " FROM sessions WHERE id = ?", (sid,)).fetchone()
+            hr_rows = self.db.execute("SELECT t_s, bpm FROM heart_rate WHERE session_id = ?"
+                                      " ORDER BY t_s", (sid,)).fetchall()
         if s is None:
             return None
         times = self.pulse_times(sid)
         if duration is None:
             duration = s["duration_s"] or (times[-1] if times else 0.0)
-        return Ride(times, duration, s["pulses_per_rev"], s["wheel_m"],
-                    s["weight_kg"] or DEFAULT_SETTINGS["weight_kg"])
+        weight = s["weight_kg"] or DEFAULT_SETTINGS["weight_kg"]
+        athlete = Athlete(**json.loads(s["athlete"])) if s["athlete"] else Athlete(weight_kg=weight)
+        hr = HeartRateSeries([tuple(r) for r in hr_rows], athlete) if hr_rows else None
+        return Ride(times, duration, s["pulses_per_rev"], s["wheel_m"], weight, hr)
 
     def _store_summary(self, sid: int, ride: Ride, ended_at: str | None = None) -> None:
         agg = ride.summary()
         with self.lock:
             self.db.execute(
                 "UPDATE sessions SET ended_at = COALESCE(?, ended_at), duration_s=?, moving_s=?,"
-                " revs=?, avg_rpm=?, max_rpm=?, distance_km=?, kcal=?, bests=?, sparkline=?"
-                " WHERE id=?",
+                " revs=?, avg_rpm=?, max_rpm=?, distance_km=?, kcal=?, bests=?, sparkline=?,"
+                " avg_hr=?, max_hr=?, trimp=? WHERE id=?",
                 (ended_at, agg["duration_s"], agg["moving_s"], agg["revs"], agg["avg_rpm"],
                  agg["max_rpm"], agg["distance_km"], agg["kcal"], json.dumps(agg["bests"]),
-                 json.dumps(agg["sparkline"]), sid))
+                 json.dumps(agg["sparkline"]), agg["avg_hr"], agg["max_hr"], agg["trimp"], sid))
             self.db.commit()
 
     def finish_session(self, sid: int, duration_s: float) -> bool:
@@ -275,7 +295,7 @@ class Database:
         monday = today - timedelta(days=today.weekday())
         week_starts = [monday - timedelta(weeks=i) for i in range(weeks - 1, -1, -1)]
         by_week = {w: {"week": w.isoformat(), "count": 0, "moving_s": 0.0, "distance_km": 0.0,
-                       "revs": 0} for w in week_starts}
+                       "revs": 0, "trimp": 0.0} for w in week_starts}
         days: dict[str, float] = {}
         totals = {"count": 0, "moving_s": 0.0, "distance_km": 0.0, "revs": 0, "kcal": 0.0}
         records: dict[str, dict] = {}
@@ -295,6 +315,7 @@ class Database:
                 b["moving_s"] += moving
                 b["distance_km"] += dist
                 b["revs"] += a["revs"] or 0
+                b["trimp"] += a["trimp"] or 0
             totals["count"] += 1
             totals["moving_s"] += moving
             totals["distance_km"] += dist
