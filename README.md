@@ -41,9 +41,15 @@ idle noise, slow pedalling, a burst of electrical interference, and a clean 77 r
 ## Features
 
 - Live cadence with zones, ride time, moving time, revolutions, estimated distance, speed and calories
-- Pause / resume, title and notes when you save
-- Activity feed and a report per ride: cadence chart, time in zone, per-km splits, best 1 to 60 min
-  efforts with personal records
+- Structured workouts (HIIT 30/30, Tabata, sprints, pyramid, steady cadence, endurance) and a builder
+  for your own intervals. Each step has a target rpm range, a countdown, and beeps plus a spoken cue
+  (Portuguese) when it changes
+- Free rides with an optional time or distance goal
+- Heart rate from a Wear OS watch through [Pulsoid](https://pulsoid.net), see below
+- Pause / resume (space bar), focus mode (F), title and notes when you save
+- Activity feed and a report per ride: cadence chart with the workout's target bands, time in
+  target per step, time in zone, per-km splits, best 1 to 60 min efforts, and a heads-up when you
+  set a new personal record
 - Export to **TCX** (upload to Strava or Garmin Connect as an indoor ride) or CSV
 - Weekly goal, streak, 12-week volume, 16-week calendar, all-time totals
 - Settings screen with a live signal meter and a 10 second auto calibration
@@ -57,9 +63,39 @@ idle noise, slow pedalling, a burst of electrical interference, and a clean 77 r
 |---|---|
 | ![Progress](docs/progress.png) | ![Settings](docs/settings.png) |
 
+![Interval workout with heart rate](docs/workout.png)
+
 Distance and speed are estimates: you set how many metres one pedal revolution is worth (6 m is a
-reasonable middle gear). Calories use a MET value picked from the average cadence, times body weight
-and moving time. There's no resistance or power measurement, so treat it as a ballpark.
+reasonable middle gear). Without heart rate, calories use a MET value picked from the average
+cadence, times body weight and moving time. There's no resistance or power measurement, so treat
+it as a ballpark.
+
+## Heart rate (Pulsoid)
+
+The bike only knows cadence. To get some idea of how hard a ride actually was, the app can pull
+heart rate from a Wear OS watch through Pulsoid: the watch app sends readings to the Pulsoid phone
+app, Pulsoid streams them over a WebSocket, and ErgoBike listens.
+
+1. Install Pulsoid on your Android phone and log in with a pulsoid.net account.
+2. Open Pulsoid on the watch and start measuring.
+3. Create a token at [pulsoid.net/ui/keys](https://pulsoid.net/ui/keys) with the
+   `data:heart_rate:read` scope. Manual tokens are a feature of Pulsoid's BRO plan (there's a trial).
+4. Paste it in **Ajustes > Frequência cardíaca**, press **Testar**, then save.
+
+With heart rate the app adds:
+
+- live bpm, % of max and heart-rate zone next to the cadence, plus its own chart
+- calories from heart rate (Keytel et al., 2005) instead of the cadence-based MET guess
+- training load per ride and per week (Banister TRIMP)
+- cardiac drift: how much rpm-per-beat drops from the first to the second half of a steady ride
+- heart rate per workout step, and how far it falls in the first minute of each rest
+- heart rate in the TCX export, so it shows up on Strava
+
+Pulsoid only exposes heart rate, so there's no HRV or RR data. Max heart rate defaults to
+208 - 0.7 x age (Tanaka) unless you set your own.
+
+No watch yet? `python -m ergobike --demo-hr` streams a simulated heart rate through a local fake
+Pulsoid server, which is also what the tests use.
 
 ## Getting started
 
@@ -98,6 +134,7 @@ python -m venv .venv
 .venv\Scripts\python -m ergobike                  # desktop window
 .venv\Scripts\python -m ergobike --browser        # same thing in your browser
 .venv\Scripts\python -m ergobike --replay tests\data\realtek_mme_77rpm.wav   # no bike needed
+.venv\Scripts\python -m ergobike --demo-hr            # simulated heart rate, no watch needed
 .venv\Scripts\python -m pytest
 ```
 
@@ -149,6 +186,9 @@ ergobike/
   analysis.py   post-ride metrics, zones, splits, best efforts, TCX export
   audio.py      microphone stream, WAV replay and recording
   recorder.py   live ride state machine and stats
+  workouts.py   built-in and custom interval plans, step tracking
+  heartrate.py  Pulsoid WebSocket client and token check
+  demo_hr.py    fake Pulsoid server for tests and --demo-hr
   storage.py    SQLite (rides, pulses, settings)
   server.py     FastAPI app + WebSocket for the UI
   desktop.py    WebView2 window around the server
